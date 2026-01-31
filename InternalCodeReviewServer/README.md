@@ -59,6 +59,21 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8009
 ```
 
+## 计划任务与无窗口启动（Windows）
+
+- **start_server.bat**：启动服务并将输出写入 `logs\server_YYYYMMDD.log`。双击会显示命令行窗口；由计划任务在「系统启动时」调用则不显示窗口。
+- **start_server_hidden.vbs**：无窗口启动（内部调用 start_server.bat）。适合放入「启动」文件夹或计划任务「用户登录时」运行。
+- **install_scheduled_task.bat**：以**管理员身份运行**后，会创建计划任务 **InternalCodeReviewServer**，在**系统启动时**自动运行服务且不显示命令行窗口。日志在 `InternalCodeReviewServer\logs\` 下。
+- **uninstall_scheduled_task.bat**：以管理员身份运行可删除上述计划任务。
+
+**步骤**：
+
+1. 确认本目录下已有 `.env` 且配置正确（如 `GH_TOKEN`、`LOCAL_REPO_PATH`、`CLAUDE_WORKING_DIR`）。
+2. 右键 **install_scheduled_task.bat** →「以管理员身份运行」。
+3. 重启电脑或在该任务上右键「运行」，服务会在后台启动，无命令行窗口。查看日志：`InternalCodeReviewServer\logs\server_YYYYMMDD.log`。
+
+若计划任务未启动（如 SYSTEM 下找不到 Python），可在 **start_server.bat** 中把 `python` 改为 Python 的完整路径（如 `C:\Python312\python.exe`）。
+
 ## Docker 运行
 
 本服务需在**内网一台能执行 Claude Code CLI 和 gh 的机器**上运行。若 Claude Code 与 gh 已安装在宿主机，可挂载宿主机 PATH 或可执行文件，并在容器内设置 `GH_TOKEN`（及可选 `ANTHROPIC_API_KEY`）；否则建议直接在本机用 uvicorn 运行（不经过 Docker），以避免 CLI 安装与认证的复杂性。
