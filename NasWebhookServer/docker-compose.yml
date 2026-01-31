@@ -1,0 +1,15 @@
+# NasWebhookServer：GitHub Webhook 中继
+# 使用前：cp .env.example .env，填入 GITHUB_WEBHOOK_SECRET、INTERNAL_TARGET_URL
+
+services:
+  nas-webhook-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nas-webhook-server:latest
+    container_name: nas-webhook-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
