@@ -38,7 +38,7 @@ cd InternalCodeReviewServer
 cp .env.example .env
 # 编辑 .env 填入 GH_TOKEN（ANTHROPIC_API_KEY 可选，已登录 claude 可不填）
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8080
+uvicorn main:app --host 0.0.0.0 --port 8009
 ```
 
 ## Docker 运行
@@ -47,7 +47,7 @@ uvicorn main:app --host 0.0.0.0 --port 8080
 
 ## 与 NasWebhookServer 的对接
 
-- NasWebhookServer 的 `INTERNAL_TARGET_URL` 指向本机地址，例如 `http://192.168.1.100:8080`。
+- NasWebhookServer 的 `INTERNAL_TARGET_URL` 指向本机地址，例如 `http://192.168.1.100:8009`。
 - `INTERNAL_TARGET_PATH` 保持默认 `/webhook/trigger`，或与本服务路由一致。
 - 本服务只处理 `event == pull_request`，其它事件返回 200 并忽略。
 
