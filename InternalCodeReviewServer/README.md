@@ -9,7 +9,7 @@
 3. 立即返回 202 Accepted，在后台：
    - 若配置了 **LOCAL_REPO_PATH** 且（未设 LOCAL_REPO_NAME 或与 webhook 的 repo 匹配）：直接在该本地仓库目录执行 code review；
    - 否则使用 `gh repo clone <repo>` 克隆到 `REPO_ROOT` 下，`git checkout <head_sha>`；
-   - 在仓库目录下启动 **Claude Code 终端**，非交互执行：`claude -p "/code-review:code-review"`。若 code-review 技能在子目录（如 monorepo 下的 `knight-client`），可配置 **CLAUDE_WORKING_DIR**（绝对路径）或 **CLAUDE_SUBDIR**（相对子目录），在此目录下执行 claude。
+   - 在仓库目录下启动 **Claude Code 终端**，**一律执行** `/code-review:code-review` 进行审核；默认在其后附加**自然语言提示**（repo、PR 号、评审要求及「若未产生任何 PR 评论则必须发一条总结评论」等）。设 `CLAUDE_USE_NATURAL_PROMPT=0` 则仅发 slash 命令、不附加提示。若 code-review 在子目录（如 `knight-client`），可配置 **CLAUDE_WORKING_DIR** 或 **CLAUDE_SUBDIR**。
 
 ## 前置条件
 
@@ -27,7 +27,8 @@
 | `GH_TOKEN` | 是 | GitHub Token（repo、pull_request 权限） |
 | `ANTHROPIC_API_KEY` | 否 | Anthropic API Key；已用 claude 登录过可不填 |
 | `CLAUDE_CLI` | 否 | Claude Code 可执行名或路径，默认 `claude` |
-| `CLAUDE_CODE_REVIEW_CMD` | 否 | 在 Claude Code 终端中执行的 slash 命令，默认 `/code-review:code-review` |
+| `CLAUDE_USE_NATURAL_PROMPT` | 否 | 是否在 slash 命令后附加自然语言提示（1/true 默认）；0/false 则仅发 slash 命令 |
+| `CLAUDE_CODE_REVIEW_CMD` | 否 | 审核一律使用的 slash 命令，默认 `/code-review:code-review` |
 | `REPO_ROOT` | 否 | 克隆仓库的根目录，默认系统临时目录 |
 | `LOCAL_REPO_PATH` | 否 | 本地仓库绝对路径；指定后不克隆，直接在该目录执行 code review |
 | `LOCAL_REPO_NAME` | 否 | 与 webhook 的 repo 匹配时才用本地仓库（如 `owner_repo` 或 `owner/repo`）；不设则任意 PR 都用 LOCAL_REPO_PATH |
@@ -86,5 +87,7 @@ uvicorn main:app --host 0.0.0.0 --port 8009
 
 ## Code Review 行为
 
-- 通过 **Claude Code 终端** 执行 slash 命令 `/code-review:code-review`（可由 `CLAUDE_CODE_REVIEW_CMD` 覆盖）。
-- Claude Code 的 code-review 技能在仓库目录下运行，可使用 gh、读写文件等工具完成 PR 审核并提交评论；具体行为由 Claude Code 的 code-review 技能定义。
+- **一律使用** slash 命令（`CLAUDE_CODE_REVIEW_CMD`，默认 `/code-review:code-review`）进行审核。
+- **默认**（`CLAUDE_USE_NATURAL_PROMPT=1`）：在 slash 命令后附加**自然语言提示**，说明当前 repo、PR 号，要求做 PR 代码评审；并约定：**若本次未产生任何 PR 评论，则必须发表一条总结评论**（如「已自动评审，本次未发现需反馈的问题。」）。
+- 设置 `CLAUDE_USE_NATURAL_PROMPT=0` 时，仅发送 slash 命令，不附加自然语言提示。
+- Claude Code 在仓库目录（或 `CLAUDE_WORKING_DIR`）下运行，可使用 gh、Bash、Read 等工具完成评审并发表评论。

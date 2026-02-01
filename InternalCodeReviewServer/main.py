@@ -60,6 +60,11 @@ async def webhook_trigger(request: Request) -> JSONResponse:
         logger.info("忽略非 PR 事件 event=%s repo=%s", event, repo)
         return JSONResponse(status_code=200, content={"ok": True, "skipped": "not pull_request"})
 
+    action = payload.get("action", "")
+    if action == "closed":
+        logger.info("忽略已关闭的 PR event=%s repo=%s action=%s", event, repo, action)
+        return JSONResponse(status_code=200, content={"ok": True, "skipped": "pull_request closed"})
+
     pr_info = get_pr_info(payload)
     if not pr_info:
         logger.warning("无法从 payload 解析 PR 信息 repo=%s payload_keys=%s", repo, list(payload.keys())[:10])

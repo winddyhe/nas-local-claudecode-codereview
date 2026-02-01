@@ -20,7 +20,9 @@ REPO_ROOT = os.environ.get("REPO_ROOT", tempfile.gettempdir())
 LOCAL_REPO_PATH = os.environ.get("LOCAL_REPO_PATH", "").strip()
 LOCAL_REPO_NAME = os.environ.get("LOCAL_REPO_NAME", "").strip()
 CLAUDE_CLI = os.environ.get("CLAUDE_CLI", "claude")
-# 在 Claude Code 终端中执行的 slash 命令，默认 /code-review:code-review
+# 是否在 slash 命令后附加自然语言提示（1/true 启用，0/false 则仅用下方 slash 命令）
+CLAUDE_USE_NATURAL_PROMPT = os.environ.get("CLAUDE_USE_NATURAL_PROMPT", "1").strip().lower() in ("1", "true", "yes")
+# 审核一律使用的 slash 命令（自然语言模式会在此命令后附加提示词）
 CLAUDE_CODE_REVIEW_CMD = os.environ.get("CLAUDE_CODE_REVIEW_CMD", "/code-review:code-review")
 # Claude Code 启动目录：若 code-review 技能在子目录（如 knight-client），填该目录绝对路径；
 # 此时 LOCAL_REPO_PATH 仍为 git 根目录，仅执行 claude 时切到此目录
@@ -50,6 +52,23 @@ def get_pr_info(payload: dict[str, Any]) -> tuple[str, int, str, str] | None:
     if not repo_full_name or pr_number is None or not head_sha:
         return None
     return (repo_full_name, int(pr_number), head_sha, base_sha)
+
+
+# 自然语言 code review 提示词模板（占位符：repo, pr_number, head_sha, base_sha）
+# 要求：做 PR 代码评审；若本次未产生任何 PR 评论，则必须发一条总结评论表示已自动评审
+_DEFAULT_CODE_REVIEW_PROMPT = """你正在对本 PR 做自动代码评审。当前仓库为 {repo}，PR 编号为 {pr_number}，head_sha={head_sha}，base_sha={base_sha}。
+
+请按以下步骤执行（可使用 gh、Bash、Read 等工具）：
+1. 使用 gh pr diff 等获取本 PR 的变更内容，进行代码评审。
+2. 若发现需要反馈的问题，请在对应位置发表 inline 评论或总结评论（通过 gh api 或 gh pr review 等）。
+3. **若本次评审没有发现需要反馈的问题、因而没有发表任何 PR 评论**，则你必须至少发表一条总结评论到本 PR，内容表示“已自动评审过”，例如：
+   - 「已自动评审，本次未发现需反馈的问题。」
+   - 或英文："Automatic review completed; no issues to report this time."
+
+即：本次执行结束时，本 PR 上必须有至少一条由你发表的评论，以表示已经自动评审过了。"""
+CODE_REVIEW_PROMPT_TEMPLATE = os.environ.get(
+    "CODE_REVIEW_PROMPT_TEMPLATE", _DEFAULT_CODE_REVIEW_PROMPT
+)
 
 
 def _clone_and_checkout(repo_full_name: str, head_sha: str, work_dir: Path) -> bool:
@@ -120,10 +139,16 @@ def _clone_and_checkout(repo_full_name: str, head_sha: str, work_dir: Path) -> b
         return False
 
 
-def _run_claude_code_review_in_dir(repo_dir: Path) -> bool:
+def _run_claude_code_review_in_dir(
+    repo_dir: Path,
+    repo_full_name: str | None = None,
+    pr_number: int | None = None,
+    head_sha: str = "",
+    base_sha: str = "",
+) -> bool:
     """
-    在指定仓库目录中执行 Claude Code /code-review:code-review。
-    供本地测试或使用 LOCAL_REPO_PATH 时调用。
+    在指定仓库目录中执行 Claude Code：一律使用 /code-review:code-review 命令进行审核。
+    若 CLAUDE_USE_NATURAL_PROMPT 且提供了 repo_full_name、pr_number，则在命令后附加自然语言提示词。
     """
     if not repo_dir.is_dir():
         logger.error("仓库目录不存在或不是目录: %s", repo_dir)
@@ -135,15 +160,32 @@ def _run_claude_code_review_in_dir(repo_dir: Path) -> bool:
     if GH_TOKEN:
         env["GH_TOKEN"] = GH_TOKEN
 
-    cmd = [CLAUDE_CLI, "-p", CLAUDE_CODE_REVIEW_CMD]
-    try:
+    use_natural = CLAUDE_USE_NATURAL_PROMPT and repo_full_name is not None and pr_number is not None
+    if use_natural:
+        extra_prompt = CODE_REVIEW_PROMPT_TEMPLATE.format(
+            repo=repo_full_name,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+        # 先发 slash 命令，再附上自然语言说明
+        prompt = CLAUDE_CODE_REVIEW_CMD + "\n\n" + extra_prompt
+        cmd = [CLAUDE_CLI, "-p", prompt]
         logger.info(
-            "[claude] 即将执行 cwd=%s 完整命令=%s %s %s",
+            "[claude] 即将执行（/code-review:code-review + 自然语言） cwd=%s repo=%s pr=%s prompt_len=%s",
             repo_dir,
-            CLAUDE_CLI,
-            "-p",
+            repo_full_name,
+            pr_number,
+            len(prompt),
+        )
+    else:
+        cmd = [CLAUDE_CLI, "-p", CLAUDE_CODE_REVIEW_CMD]
+        logger.info(
+            "[claude] 即将执行（slash 命令） cwd=%s cmd=%s",
+            repo_dir,
             CLAUDE_CODE_REVIEW_CMD,
         )
+    try:
         r = subprocess.run(
             cmd,
             cwd=str(repo_dir),
@@ -154,8 +196,6 @@ def _run_claude_code_review_in_dir(repo_dir: Path) -> bool:
             errors="replace",
             timeout=CLAUDE_REVIEW_TIMEOUT,
         )
-        stdout_preview = (r.stdout or "")[:800]
-        stderr_preview = (r.stderr or "")[:800]
         logger.info(
             "[claude] 进程结束 returncode=%s stdout_len=%s stderr_len=%s",
             r.returncode,
@@ -163,9 +203,9 @@ def _run_claude_code_review_in_dir(repo_dir: Path) -> bool:
             len(r.stderr or ""),
         )
         if r.stdout:
-            logger.info("[claude] stdout 前 800 字符: %s", stdout_preview)
+            logger.info("[claude] stdout 完整输出:\n%s", r.stdout)
         if r.stderr:
-            logger.warning("[claude] stderr 前 800 字符: %s", stderr_preview)
+            logger.warning("[claude] stderr 完整输出:\n%s", r.stderr)
         if r.returncode != 0:
             logger.warning(
                 "[claude] 退出码非 0 returncode=%s",
@@ -196,7 +236,13 @@ def _run_claude_code_review(
     if not clone_dir.exists():
         logger.error("仓库目录不存在: %s", clone_dir)
         return False
-    return _run_claude_code_review_in_dir(clone_dir)
+    return _run_claude_code_review_in_dir(
+        clone_dir,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+    )
 
 
 def _run_code_review_sync(
@@ -259,7 +305,13 @@ def _run_code_review_sync(
                 logger.info("[code_review_sync] Claude 工作子目录 cwd=%s", claude_cwd)
             else:
                 claude_cwd = repo_dir_local
-            ok = _run_claude_code_review_in_dir(claude_cwd)
+            ok = _run_claude_code_review_in_dir(
+                claude_cwd,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
             logger.info("[code_review_sync] 结束 repo=%s 使用本地仓库 ok=%s", repo_full_name, ok)
             return
 
@@ -277,7 +329,13 @@ def _run_code_review_sync(
         claude_dir = (clone_dir / CLAUDE_SUBDIR).resolve()
         if claude_dir.is_dir():
             logger.info("[code_review_sync] Claude 工作子目录 cwd=%s", claude_dir)
-            ok = _run_claude_code_review_in_dir(claude_dir)
+            ok = _run_claude_code_review_in_dir(
+                claude_dir,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
         else:
             logger.warning("[code_review_sync] CLAUDE_SUBDIR 不存在: %s，使用 clone_dir", claude_dir)
             ok = _run_claude_code_review(
