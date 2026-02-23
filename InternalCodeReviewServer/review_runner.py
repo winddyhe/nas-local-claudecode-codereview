@@ -50,10 +50,10 @@ def _log_config():
 _log_config()
 
 
-def get_pr_info(payload: dict[str, Any]) -> tuple[str, int, str, str] | None:
+def get_pr_info(payload: dict[str, Any]) -> tuple[str, int, str, str, str, str] | None:
     """
     从 GitHub Webhook payload 中解析 PR 信息。
-    返回 (repo_full_name, pr_number, head_sha, base_sha) 或 None。
+    返回 (repo_full_name, pr_number, head_sha, base_sha, head_ref, base_ref) 或 None。
     """
     pr = payload.get("pull_request")
     repo = payload.get("repository", {})
@@ -65,9 +65,11 @@ def get_pr_info(payload: dict[str, Any]) -> tuple[str, int, str, str] | None:
     base = pr.get("base", {})
     head_sha = head.get("sha") or ""
     base_sha = base.get("sha") or ""
+    head_ref = head.get("ref") or ""  # PR 的 head 分支名
+    base_ref = base.get("ref") or ""  # PR 的 base 分支名
     if not repo_full_name or pr_number is None or not head_sha:
         return None
-    return (repo_full_name, int(pr_number), head_sha, base_sha)
+    return (repo_full_name, int(pr_number), head_sha, base_sha, head_ref, base_ref)
 
 
 # 自然语言 code review 提示词模板（占位符：repo, pr_number, head_sha, base_sha）
@@ -85,6 +87,119 @@ _DEFAULT_CODE_REVIEW_PROMPT = """你正在对本 PR 做自动代码评审。当�
 CODE_REVIEW_PROMPT_TEMPLATE = os.environ.get(
     "CODE_REVIEW_PROMPT_TEMPLATE", _DEFAULT_CODE_REVIEW_PROMPT
 )
+
+
+def _fetch_and_checkout(repo_dir: Path, head_sha: str, head_ref: str = "") -> bool:
+    """
+    在本地仓库中拉取最新代码并切换到 PR 的 head SHA。
+    1. git fetch origin --prune 获取最新远程分支
+    2. git checkout head_sha 切换到 PR 的 head commit
+    """
+    start_time = time.time()
+    logger.info("[git] 开始拉取最新代码...")
+
+    env = os.environ.copy()
+    if GH_TOKEN:
+        env["GH_TOKEN"] = GH_TOKEN
+
+    try:
+        # 1. git fetch origin --prune
+        logger.info("[git] 执行: git fetch origin --prune")
+        r1 = subprocess.run(
+            ["git", "fetch", "origin", "--prune"],
+            cwd=str(repo_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        if r1.returncode != 0:
+            logger.warning("[git] git fetch 警告: %s", r1.stderr)
+        else:
+            logger.info("[git] git fetch 完成")
+
+        # 2. 尝试直接 checkout 到 head_sha
+        logger.info("[git] 切换到 PR head: %s%s", head_sha[:7], f" (分支: {head_ref})" if head_ref else "")
+        r2 = subprocess.run(
+            ["git", "checkout", head_sha],
+            cwd=str(repo_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+
+        if r2.returncode != 0:
+            # 如果 SHA 不存在，尝试 fetch 该 ref
+            logger.info("[git] SHA 不存在本地，尝试 fetch: %s", head_ref or head_sha[:7])
+            if head_ref:
+                r3 = subprocess.run(
+                    ["git", "fetch", "origin", f"{head_ref}:{head_ref}"],
+                    cwd=str(repo_dir),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
+                logger.info("[git] git fetch origin %s: returncode=%s", head_ref, r3.returncode)
+
+            # 再次尝试 fetch 该 SHA
+            r4 = subprocess.run(
+                ["git", "fetch", "origin", head_sha],
+                cwd=str(repo_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            logger.info("[git] git fetch origin %s: returncode=%s", head_sha[:7], r4.returncode)
+
+            # 重试 checkout
+            r5 = subprocess.run(
+                ["git", "checkout", head_sha],
+                cwd=str(repo_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if r5.returncode != 0:
+                logger.error("[git] checkout 失败: %s", r5.stderr)
+                return False
+
+        # 验证当前 HEAD
+        r6 = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        current_head = r6.stdout.strip()[:7] if r6.returncode == 0 else "(unknown)"
+        elapsed = time.time() - start_time
+        logger.info("[git] 已切换到 %s (目标: %s)，耗时 %.1f 秒", current_head, head_sha[:7], elapsed)
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        logger.error("[git] 操作超时")
+        return False
+    except Exception as e:
+        logger.exception("[git] 异常: %s", e)
+        return False
 
 
 def _clone_and_checkout(repo_full_name: str, head_sha: str, work_dir: Path) -> bool:
@@ -308,6 +423,8 @@ def _run_code_review_sync(
     base_sha: str,
     pr_title: str = "",
     pr_author: str = "",
+    head_ref: str = "",
+    base_ref: str = "",
 ) -> None:
     """
     同步执行：若配置了 LOCAL_REPO_PATH 且匹配则直接用；否则克隆后在 Claude Code 终端执行。
@@ -318,8 +435,9 @@ def _run_code_review_sync(
     logger.info("[review] 仓库: %s", repo_full_name)
     logger.info("[review] PR: #%s", pr_number)
     logger.info("[review] 标题: %s", pr_title[:50] if pr_title else "(无)")
-    logger.info("[review] HEAD: %s", head_sha[:7])
-    logger.info("[review] BASE: %s", base_sha[:7])
+    logger.info("[review] 作者: %s", pr_author or "(未知)")
+    logger.info("[review] HEAD: %s (%s)", head_sha[:7], head_ref or "detached")
+    logger.info("[review] BASE: %s (%s)", base_sha[:7], base_ref or "unknown")
     logger.info("=" * 60)
 
     repo_dir_local = Path(LOCAL_REPO_PATH).resolve() if LOCAL_REPO_PATH else None
@@ -341,6 +459,12 @@ def _run_code_review_sync(
 
         if repo_dir_local:
             logger.info("[review] 使用本地仓库: %s", repo_dir_local)
+
+            # ★ 拉取最新代码并切换到 PR head
+            if not _fetch_and_checkout(repo_dir_local, head_sha, head_ref):
+                logger.error("[review] 拉取代码失败，跳过代码审查")
+                return
+
             # Claude 启动目录：优先 CLAUDE_WORKING_DIR，否则 repo 根（或 repo/CLAUDE_SUBDIR）
             if CLAUDE_WORKING_DIR and Path(CLAUDE_WORKING_DIR).is_dir():
                 claude_cwd = Path(CLAUDE_WORKING_DIR).resolve()
@@ -415,9 +539,11 @@ async def run_code_review_async(
     base_sha: str,
     pr_title: str = "",
     pr_author: str = "",
+    head_ref: str = "",
+    base_ref: str = "",
 ) -> None:
     """异步执行 code review（在线程池中：克隆 + Claude Code 终端 /code-review）。"""
-    logger.info("[async] 提交后台任务: repo=%s pr=#%s", repo_full_name, pr_number)
+    logger.info("[async] 提交后台任务: repo=%s pr=#%s head=%s", repo_full_name, pr_number, head_sha[:7])
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         None,
@@ -428,4 +554,6 @@ async def run_code_review_async(
         base_sha,
         pr_title,
         pr_author,
+        head_ref,
+        base_ref,
     )

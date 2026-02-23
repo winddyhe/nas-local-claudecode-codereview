@@ -91,7 +91,7 @@ async def webhook_trigger(request: Request) -> JSONResponse:
         logger.warning("[%s] 无法从 payload 解析 PR 信息 repo=%s payload_keys=%s", client_host, repo, list(payload.keys())[:10])
         return JSONResponse(status_code=200, content={"ok": True, "skipped": "no pr info"})
 
-    repo_full_name, pr_number, head_sha, base_sha = pr_info
+    repo_full_name, pr_number, head_sha, base_sha, head_ref, base_ref = pr_info
 
     # 获取 PR 标题和作者（如果有）
     pr_data = payload.get("pull_request", {})
@@ -104,8 +104,8 @@ async def webhook_trigger(request: Request) -> JSONResponse:
         client_host, repo_full_name, pr_number, pr_title[:50], pr_author
     )
     logger.info(
-        "[%s] PR SHA: head=%s base=%s",
-        client_host, head_sha[:7], base_sha[:7]
+        "[%s] PR 分支: head=%s (%s) base=%s (%s)",
+        client_host, head_sha[:7], head_ref or "detached", base_sha[:7], base_ref or "unknown"
     )
     if pr_url:
         logger.info("[%s] PR URL: %s", client_host, pr_url)
@@ -121,7 +121,10 @@ async def webhook_trigger(request: Request) -> JSONResponse:
             else:
                 logger.info("[callback] code review 任务完成 repo=%s pr=%s", repo_full_name, pr_number)
 
-    task = asyncio.create_task(run_code_review_async(repo_full_name, pr_number, head_sha, base_sha, pr_title, pr_author))
+    task = asyncio.create_task(run_code_review_async(
+        repo_full_name, pr_number, head_sha, base_sha,
+        pr_title, pr_author, head_ref, base_ref
+    ))
     task.add_done_callback(_on_done)
 
     logger.info("[%s] 已提交 code review 后台任务 repo=%s pr=%s head=%s", client_host, repo_full_name, pr_number, head_sha[:7])
@@ -133,6 +136,8 @@ async def webhook_trigger(request: Request) -> JSONResponse:
             "repo": repo_full_name,
             "pr": pr_number,
             "head_sha": head_sha[:7],
+            "head_ref": head_ref,
+            "base_ref": base_ref,
             "title": pr_title,
         },
     )
