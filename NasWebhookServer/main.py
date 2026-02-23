@@ -3,7 +3,13 @@ NasWebhookServer：接收 GitHub Webhook，校验后通过 HTTP 转发到内网 
 """
 import logging
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+
+# 启动时加载 .env 文件
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
